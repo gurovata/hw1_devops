@@ -1,0 +1,14 @@
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/crash.log
+**/override.tf
+**/*_override.tf
+**/terraform.tfvars
+**/terraform.tfvars.json
+**/id_*
+**/*.pem
+work/
+ansible/keys/
+.venv/
