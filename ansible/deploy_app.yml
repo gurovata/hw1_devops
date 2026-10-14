@@ -1,0 +1,32 @@
+---
+- name: Deploy application
+  hosts: servers
+  become: true
+  vars:
+    ansible_user: deployer
+  tasks:
+    - name: Create application directory
+      ansible.builtin.file:
+        path: /opt/app
+        state: directory
+        owner: deployer
+        group: deployer
+        mode: "0755"
+
+    - name: Copy application files
+      ansible.builtin.copy:
+        src: ../compose/
+        dest: /opt/app/
+        owner: deployer
+        group: deployer
+        mode: preserve
+
+    - name: Start application
+      community.docker.docker_compose_v2:
+        project_src: /opt/app
+        project_name: hw1
+        state: present
+        pull: missing
+        build: policy
+        wait: true
+        wait_timeout: 120

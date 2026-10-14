@@ -1,0 +1,99 @@
+---
+- name: Prepare Ubuntu host
+  hosts: servers
+  become: true
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - sudo
+          - gawk
+          - rsyslog
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Create keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker repository key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Get package architecture
+      ansible.builtin.command: dpkg --print-architecture
+      register: package_architecture
+      changed_when: false
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ package_architecture.stdout }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        filename: docker
+        state: present
+
+    - name: Install Docker and Compose
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Enable and start Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Enable and start system log
+      ansible.builtin.service:
+        name: rsyslog
+        state: started
+        enabled: true
+
+    - name: Create deployer user
+      ansible.builtin.user:
+        name: deployer
+        shell: /bin/bash
+        groups:
+          - sudo
+          - gawk
+          - rsyslog
+          - docker
+        append: true
+        create_home: true
+        password_lock: true
+
+    - name: Allow sudo for deployer
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/deployer
+        content: "deployer ALL=(ALL) NOPASSWD: ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Create SSH directory
+      ansible.builtin.file:
+        path: /home/deployer/.ssh
+        state: directory
+        owner: deployer
+        group: deployer
+        mode: "0700"
+
+    - name: Add SSH public key
+      ansible.builtin.copy:
+        content: "{{ lookup('file', 'keys/id_ed25519.pub') }}\n"
+        dest: /home/deployer/.ssh/authorized_keys
+        owner: deployer
+        group: deployer
+        mode: "0600"
