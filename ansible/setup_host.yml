@@ -1,0 +1,108 @@
+---
+- name: Prepare Ubuntu host
+  hosts: servers
+  become: true
+  tasks:
+    # Сразу после запуска Ubuntu apt-daily занимает apt; ждём, пока он закончит
+    - name: Wait for automatic apt updates
+      ansible.builtin.command: systemd-run --wait --quiet --property=After=apt-daily.service /bin/true
+      changed_when: false
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gawk
+          - rsyslog
+          - openssh-server
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Download Docker repository key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        filename: docker
+
+    - name: Install Docker Engine and Docker Compose
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+
+    - name: Start Docker and enable it on boot
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create deployer user
+      ansible.builtin.user:
+        name: deployer
+        shell: /bin/bash
+        groups: sudo,docker,adm
+        append: true
+        password_lock: true
+
+    - name: Allow sudo without password for deployer
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/deployer
+        content: "deployer ALL=(ALL) NOPASSWD: ALL\n"
+        mode: "0440"
+        validate: visudo -cf %s
+
+    - name: Create SSH directory for deployer
+      ansible.builtin.file:
+        path: /home/deployer/.ssh
+        state: directory
+        owner: deployer
+        group: deployer
+        mode: "0700"
+
+    - name: Add SSH key for deployer
+      ansible.builtin.copy:
+        content: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}\n"
+        dest: /home/deployer/.ssh/authorized_keys
+        owner: deployer
+        group: deployer
+        mode: "0600"
+
+    - name: Allow SSH login only by key and not as root
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/10-hw1.conf
+        content: |
+          PasswordAuthentication no
+          PermitRootLogin no
+        mode: "0644"
+      notify: Restart SSH
+
+    - name: Start SSH and enable it on boot
+      ansible.builtin.service:
+        name: ssh
+        state: started
+        enabled: true
+
+    - name: Copy Docker Compose files to /opt/app
+      ansible.builtin.copy:
+        src: ../compose/
+        dest: /opt/app/
+        owner: deployer
+        group: deployer
+        mode: "0644"
+        directory_mode: "0755"
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
