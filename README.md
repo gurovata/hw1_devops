@@ -1,189 +1,137 @@
 # ДЗ 1. Фундамент DevOps-инфраструктуры
 
-В этом задании использую локальный Docker, как указано в дополнении к ДЗ. Сначала Ansible настраивает Ubuntu, затем Terraform создаёт nginx, отдельную сеть и том. После этого запускается приложение через Compose.
+Вместо облачной VM используется Ubuntu 24.04 в WSL2 на Windows 10. У неё свой IP `172.23.95.25`, systemd и вход по SSH. Порядок выполнения — как в дополнении к заданию: сначала Ansible, потом Terraform с провайдером Docker, потом Docker Compose и скрипт мониторинга.
 
-Исходники подготовлены и проверены на уровне синтаксиса и конфигурации. Полный запуск пока не выполнен: на этой Windows-машине недоступны Docker Engine и WSL. Настоящих результатов `terraform apply`, второго запуска Ansible и HTTP-запросов пока нет. Подробности в [CHECKS.md](CHECKS.md).
-
-## Что находится в проекте
-
-- `terraform/` — nginx, сеть и именованный том.
-- `ansible/` — настройка Ubuntu и развёртывание приложения.
-- `compose/` — nginx-прокси и app со страницей Hello World.
-- `scripts/monitor.sh` — проверка сервиса и ошибок в syslog.
-- `evidence/` — результаты выполненных проверок; сюда же сохраняются результаты запуска.
-
-| Окружение | Контейнеры | Сеть | Адрес на хосте Docker |
-| --- | --- | --- | --- |
-| Terraform | hw1_terraform_nginx | hw1_terraform_network | http://127.0.0.1:8081 |
-| Compose | nginx, app | hw1_app_network | http://127.0.0.1:8080 |
-
-Том `hw1_nginx_data` подключён к `/usr/share/nginx/html` в Terraform-контейнере. При первом подключении пустого тома Docker копирует в него стандартную страницу nginx. Том подключён только для чтения. Оба сервиса Compose работают в другой сети; app наружу порт не публикует.
-
-## 1. Подготовить Ubuntu
-
-Нужен Linux с systemd. Для обычного варианта подходит Ubuntu 22.04 в VirtualBox. Можно использовать Ubuntu в WSL, если там включён systemd. Установка Docker из этого playbook рассчитана на отдельный Docker Engine внутри Ubuntu: для этой Ubuntu нужно отключить интеграцию Docker Desktop.
-
-Все команды ниже выполняются из корня `hw1_devops` в Linux. Папка на Windows находится в `C:\Users\nataa\Downloads\hw1_devops`; в WSL это `/mnt/c/Users/nataa/Downloads/hw1_devops`.
-
-Проверить systemd и поставить инструменты для Ansible:
-
-```bash
-ps -p 1 -o comm=
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip openssh-client
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install 'ansible-core==2.17.14'
-ansible-galaxy collection install -r ansible/requirements.yml -p work/collections
-export ANSIBLE_COLLECTIONS_PATH="$PWD/work/collections"
-mkdir -p ansible/keys evidence
-ssh-keygen -t ed25519 -f ansible/keys/id_ed25519 -N ''
-```
-
-Версия Ansible выбрана для Python 3.10 из Ubuntu 22.04. Закрытый ключ, виртуальное окружение и временные файлы исключены из Git.
-
-Для локального запуска используется `ansible/inventory_local.ini`. Для отдельной VM используется `ansible/inventory.ini`: в нём нужно указать её настоящий адрес, SSH-порт и начального пользователя с sudo. Сейчас там пример NAT-подключения `127.0.0.1:2222`, а не адрес созданной VM. Публичный ключ `ansible/keys/id_ed25519.pub` нужно добавить начальному пользователю VM. У SSH должны быть выключены вход по паролю и вход под root. В VirtualBox можно пробросить только SSH: адрес хоста 127.0.0.1, порт хоста 2222, порт гостя 22.
-
-## 2. Сначала Ansible
-
-Простой локальный запуск в Ubuntu:
-
-```bash
-set -o pipefail
-ansible-playbook -i ansible/inventory_local.ini -K ansible/setup_host.yml | tee evidence/ansible-first.txt
-ansible-playbook -i ansible/inventory_local.ini -K ansible/setup_host.yml | tee evidence/ansible-second.txt
-```
-
-Playbook создаёт пользователя deployer, добавляет ему sudo без пароля и доступ к Docker, устанавливает Docker Engine, Compose, gawk и rsyslog, включает автозапуск Docker и rsyslog. Публичный SSH-ключ копируется deployer; его пароль заблокирован.
-
-Второй запуск нужно выполнить сразу после первого. В конце ожидается `changed=0`, `failed=0`. Это нужно проверить по настоящему выводу, а не считать результат заранее известным.
-
-Для удалённой VM команды те же, но вместо `inventory_local.ini` используется `inventory.ini` и параметр `-K` заменяется на `-b` или `-K` в зависимости от настроек sudo начального пользователя. После настройки можно проверить SSH под deployer:
-
-```bash
-ssh -i ansible/keys/id_ed25519 -o UserKnownHostsFile=ansible/keys/known_hosts -p 2222 deployer@127.0.0.1
-```
-
-При другом адресе VM нужно заменить адрес и порт в этой команде.
-
-## 3. Затем Terraform
-
-Версия CLI должна быть не ниже 1.5; версия провайдера в проекте закреплена на 4.6.0. Terraform и Compose должны работать с тем Docker Engine, который настроил Ansible. Установка CLI из официального Linux-архива в папку проекта:
-
-```bash
-mkdir -p work/bin
-curl -fL https://releases.hashicorp.com/terraform/1.13.5/terraform_1.13.5_linux_amd64.zip -o work/terraform.zip
-python3 -m zipfile -e work/terraform.zip work/bin
-chmod +x work/bin/terraform
-work/bin/terraform version
-```
-
-Ниже локальный вариант внутри Ubuntu. `sudo` нужен для обращения к Docker socket из учётной записи, которая пока не входит в группу docker. У deployer доступ к Docker уже есть.
-
-```bash
-sudo work/bin/terraform -chdir=terraform init
-sudo work/bin/terraform -chdir=terraform fmt -check
-sudo work/bin/terraform -chdir=terraform validate
-sudo work/bin/terraform -chdir=terraform plan -out=hw1.tfplan | tee evidence/terraform-plan.txt
-sudo work/bin/terraform -chdir=terraform apply hw1.tfplan | tee evidence/terraform-apply.txt
-sudo work/bin/terraform -chdir=terraform state list | tee evidence/terraform-state.txt
-curl -i http://127.0.0.1:8081 | tee evidence/terraform-curl.txt
-```
-
-Успешный запрос должен показать `HTTP/1.1 200 OK`, заголовок `Server: nginx` и стандартную страницу nginx. Ожидаемые ресурсы в state:
+## Структура
 
 ```text
-docker_container.nginx
-docker_image.nginx
-docker_network.nginx
-docker_volume.nginx
+ansible/     setup_host.yml, inventory.ini (VM по IP), inventory_local.ini (первый запуск)
+terraform/   main.tf, variables.tf, outputs.tf, mirror.tfrc
+compose/     docker-compose.yml, nginx.conf, html/index.html
+scripts/     monitor.sh
+screenshots/ скриншоты результатов
 ```
 
-`terraform.tfstate` хранится локально в `terraform/` и не отправляется в Git. После `init` файл `.terraform.lock.hcl` следует добавить в Git, чтобы сохранить выбранные версии и контрольные суммы. Не нужно удалять state: Terraform потеряет связь с созданными ресурсами.
+| Что | Контейнеры | Сеть | Порт |
+| --- | --- | --- | --- |
+| Terraform | `hw1_terraform_nginx` + том `hw1_nginx_data` | `hw1_terraform_network` | 8081 |
+| Docker Compose | `nginx` (reverse proxy) → `app` (Hello World) | `hw1_app_network` | 80 |
 
-Для Windows Docker Desktop значение `docker_host` можно поменять на `npipe:////./pipe/dockerDesktopLinuxEngine`, но это будет другой Docker Engine. Для этого варианта тоже нужно сначала выполнить часть Ansible на Linux; он не заменяет установку Docker Engine на Ubuntu.
+## Подготовка (один раз)
 
-## 4. Compose
-
-Ansible копирует `compose/` в `/opt/app` и запускает два сервиса:
+Команды выполняются в терминале Ubuntu (WSL). Нужен включённый systemd: `[boot]` и `systemd=true` в `/etc/wsl.conf`.
 
 ```bash
-ansible-playbook -i ansible/inventory_local.ini -K ansible/deploy_app.yml
-sudo docker compose -p hw1 -f /opt/app/docker-compose.yml ps | tee evidence/compose-ps.txt
-curl -i http://127.0.0.1:8080 | tee evidence/compose-curl.txt
+sudo apt update
+sudo apt install -y ansible-core unzip
+curl -Lo /tmp/terraform.zip https://hashicorp-releases.yandexcloud.net/terraform/1.13.5/terraform_1.13.5_linux_amd64.zip
+sudo unzip /tmp/terraform.zip terraform -d /usr/local/bin
+cd /mnt/c/Users/nataa/Downloads/hw1_devops
+cp terraform/mirror.tfrc ~/.terraformrc
+ls ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa
+hostname -I
 ```
 
-Ожидается `200 OK` и страница с текстом Hello World. nginx-прокси передаёт запрос в `app:80`; app находится по имени через Docker DNS. Удалённый вариант использует `inventory.ini`, а `ps` и `curl` нужно выполнить на VM.
+- Terraform скачивается с зеркала Yandex: сайт HashiCorp из России отвечает 404. По той же причине `mirror.tfrc` подключает зеркало провайдеров.
+- `hostname -I` показывает IP Ubuntu. После перезапуска WSL он может поменяться — тогда новый адрес нужно вписать в `ansible/inventory.ini`.
 
-Проверить разделение сетей и подключение тома:
+Первый запуск playbook выполняется локально. Пока нет пользователя deployer и SSH-сервера, подключиться по IP нельзя. `-K` спросит пароль sudo:
 
 ```bash
-sudo docker network inspect hw1_terraform_network hw1_app_network | tee evidence/networks.txt
-sudo docker inspect hw1_terraform_nginx --format '{{json .Mounts}}' | tee evidence/volume.txt
+ansible-playbook -i ansible/inventory_local.ini -K ansible/setup_host.yml
+sudo usermod -aG docker $USER
+ssh deployer@172.23.95.25 hostname
 ```
 
-В первой сети должен быть только Terraform-nginx, во второй — два контейнера Compose.
+`usermod` добавляет вашего пользователя в группу docker, чтобы Terraform и `docker compose` работали без sudo. Изменение действует в новом окне терминала. При первом `ssh` нужно ответить `yes`.
 
-## 5. Мониторинг
+## 1. Ansible
+
+`ansible/setup_host.yml`:
+
+- устанавливает Docker Engine и Docker Compose, включает автозапуск Docker;
+- создаёт пользователя `deployer`: sudo без пароля, группа docker, вход только по SSH-ключу;
+- запрещает вход по SSH с паролем и под root;
+- копирует файлы из `compose/` в `/opt/app`.
+
+Дальше playbook запускается по SSH через `inventory.ini`, где указан IP VM. Для проверки идемпотентности запускается два раза; во второй раз должно быть `changed=0`:
 
 ```bash
-chmod +x scripts/monitor.sh
-sudo ./scripts/monitor.sh docker | tee evidence/monitor-local.txt
-sudo ./scripts/monitor.sh service-that-does-not-exist
+ansible-playbook -i ansible/inventory.ini ansible/setup_host.yml
+ansible-playbook -i ansible/inventory.ini ansible/setup_host.yml
 ```
 
-Скрипт проверяет сервис через systemctl. Если он неактивен, выводит последние десять записей journalctl. Затем grep отбирает строки с error из `/var/log/syslog`, а awk проверяет, попадают ли они в последний час. Считается количество строк, а не отдельных слов. Учитываются обычные даты syslog и ISO-даты. gawk нужен для функций времени; rsyslog создаёт файл syslog.
+![Второй запуск Ansible](screenshots/01-ansible-second-run.jpg)
 
-Для проверки на удалённой VM скопировать скрипт и запустить его через SSH под deployer. Например, для NAT-подключения:
+## 2. Terraform
+
+`terraform/main.tf` создаёт новую сеть, том, образ и контейнер nginx. Контейнер работает только в этой сети, том подключён к `/usr/share/nginx/html`, порт 80 опубликован на нестандартном порту 8081. Порт и адрес Docker вынесены в `variables.tf`.
 
 ```bash
-scp -i ansible/keys/id_ed25519 -o UserKnownHostsFile=ansible/keys/known_hosts -P 2222 scripts/monitor.sh deployer@127.0.0.1:/home/deployer/monitor.sh
-ssh -i ansible/keys/id_ed25519 -o UserKnownHostsFile=ansible/keys/known_hosts -p 2222 deployer@127.0.0.1 'sudo bash /home/deployer/monitor.sh docker' | tee evidence/monitor-remote.txt
+cd terraform
+terraform init
+terraform plan
+terraform apply
+terraform state list
+curl -i http://172.23.95.25:8081
+cd ..
 ```
 
-Если сервис не найден или syslog недоступен, скрипт сообщает об этом и завершается с кодом 1. В пустом логе ошибок будет 0.
+![terraform apply и state list](screenshots/02-terraform-state.jpg)
 
-## 6. Git и сдача
+![curl на порт 8081](screenshots/03-terraform-curl.jpg)
 
-Локальный репозиторий подготовлен с ветками `main` и `feature/infra-setup`. Выполнено само-ревью конфигураций и путей. Удалённый репозиторий и Pull Request ещё не созданы.
+State хранится в `terraform/terraform.tfstate` и в Git не попадает. По нему Terraform знает, какие объекты он создал.
 
-В GitHub/GitLab нужно создать пустой репозиторий, добавить его настоящий URL как origin и отправить обе ветки. Затем открыть Pull Request или Merge Request из feature/infra-setup в main. После проверки и мержа поставить тег:
+## 3. Docker Compose
+
+В `/opt/app` два сервиса в общей сети `hw1_app_network`. `nginx` принимает запросы на порту 80 и передаёт их в `app` по имени сервиса. `app` отдаёт страницу Hello World и наружу порт не открывает.
 
 ```bash
-git remote add origin URL_ВАШЕГО_РЕПОЗИТОРИЯ
-git push -u origin main
-git push -u origin feature/infra-setup
+cd /opt/app
+docker compose up -d
+docker compose ps
+curl -i http://172.23.95.25
+cd /mnt/c/Users/nataa/Downloads/hw1_devops
 ```
 
-После мержа в GitHub/GitLab:
+![docker compose ps и curl](screenshots/04-compose.jpg)
+
+## 4. Мониторинг
+
+`scripts/monitor.sh <сервис>`:
+
+1. проверяет сервис через `systemctl is-active`;
+2. если сервис не работает, показывает 10 последних строк `journalctl`;
+3. считает строки с error в `/var/log/syslog` за последний час (`grep` + `awk`).
+
+Если сервис не найден или syslog недоступен, скрипт сообщает об этом и завершается с кодом 1.
+
+Локальная машина. `hw1-demo-fail` — специально созданный сервис, который сразу падает:
 
 ```bash
-git switch main
-git pull --ff-only
-git tag -a v0.1.0 -m 'Homework 1'
-git push origin v0.1.0
+./scripts/monitor.sh docker
+sudo systemd-run --unit=hw1-demo-fail /bin/sh -c 'echo error: config not found; exit 1'
+./scripts/monitor.sh hw1-demo-fail
+./scripts/monitor.sh nosuchservice
 ```
 
-Перед сдачей сделать настоящие скриншоты `terraform state list`, второго запуска Ansible, monitor.sh, Compose ps и двух curl-запросов. Сохранить их в `evidence/` и вставить ссылки на изображения в README. Сейчас таких скриншотов нет, потому что развёртывание ещё не выполнено.
+![monitor.sh локально](screenshots/05-monitor-local.jpg)
 
-## Почему выбраны такие настройки
+Число ошибок считается за скользящий последний час. Поэтому оно может уменьшиться, даже если появились новые ошибки: строки старше часа перестают учитываться.
 
-Docker-провайдер выбран по дополнению преподавателя. Поэтому Terraform не создаёт VPC, облачную VM, Security Group и IAM: эти объекты не входят в этот вариант задания. Linux для Ansible готовится отдельно.
+Удалённая VM, по SSH под deployer:
 
-Для nginx взят порт 8081, чтобы выполнить требование о нестандартном порте и не занимать 80. Порт 8080 используется для приложения. HTTP-порты доступны только на самом хосте Docker, поэтому для проверки с другого компьютера нужен SSH-туннель. Отдельные сети разделяют два окружения. Именованный том позволяет хранить файлы независимо от конкретного контейнера.
+```bash
+scp scripts/monitor.sh deployer@172.23.95.25:~
+ssh deployer@172.23.95.25 './monitor.sh docker'
+```
 
-deployer нужен для развёртывания по SSH без входа под root. Sudo без пароля выдан по условию ДЗ; группа docker тоже даёт административные возможности. Это учебная учётная запись, а не аналог облачной IAM-роли с минимальными правами.
+![monitor.sh на VM](screenshots/06-monitor-remote.jpg)
 
-При проверке возникли ограничения Windows: WSL вернул E_ACCESSDENIED, Docker Engine не был доступен, а загрузка Terraform с releases.hashicorp.com вернула HTTP 404. Поэтому выполнены проверки файлов, но результаты развёртывания нужно получить на Linux.
+## Архитектурные решения
 
-## Короткие ответы для защиты
-
-Ansible выполняет задачи по настройке системы, а Terraform описывает желаемые ресурсы и сравнивает их со state. State связывает код с настоящими ресурсами. Идемпотентность означает, что повторный запуск не меняет уже настроенную систему. Здесь она проверяется вторым запуском setup_host.yml. Для SSH используется ключ; HTTP-порты привязаны к loopback. Облачных Security Groups и IAM в Docker-варианте нет.
-
-## Документация
-
-- [Docker-провайдер Terraform](https://github.com/kreuzwerker/terraform-provider-docker)
-- [Установка Docker на Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
-- [Тома Docker](https://docs.docker.com/engine/storage/volumes/)
-- [Модуль Ansible для Compose](https://docs.ansible.com/projects/ansible/latest/collections/community/docker/docker_compose_v2_module.html)
-- [Сети Compose](https://docs.docker.com/reference/compose-file/networks/)
+- **Docker вместо облака.** По дополнению к заданию Terraform использует провайдер `kreuzwerker/docker`. Облачных VPC, Security Group и IAM здесь нет. Окружения разделены сетями Docker, наружу открыты только нужные порты, для работы создан отдельный пользователь deployer.
+- **WSL как VM.** Ubuntu в WSL2 — полноценный Linux с systemd и своим IP. Этот IP доступен только с этого компьютера.
+- **Порты.** Compose-прокси слушает 80, чтобы работал `curl http://<VM_IP>`. Terraform-nginx использует нестандартный порт 8081. `app` наружу не публикуется.
+- **Доступ.** SSH только по ключу, вход по паролю и под root запрещён. Terraform и Docker Compose запускаются без root. deployer получил sudo без пароля по условию задания.

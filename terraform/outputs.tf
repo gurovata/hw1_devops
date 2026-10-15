@@ -1,5 +1,5 @@
 output "nginx_url" {
-  value = "http://127.0.0.1:${var.nginx_port}"
+  value = "http://localhost:${var.nginx_port}"
 }
 
 output "network_name" {

@@ -1,6 +1,4 @@
 terraform {
-  required_version = ">= 1.5, < 2.0"
-
   required_providers {
     docker = {
       source  = "kreuzwerker/docker"
@@ -13,10 +11,12 @@ provider "docker" {
   host = var.docker_host
 }
 
+# Отдельная новая сеть для nginx
 resource "docker_network" "nginx" {
   name = "hw1_terraform_network"
 }
 
+# Том для файлов сайта
 resource "docker_volume" "nginx" {
   name = "hw1_nginx_data"
 }
@@ -27,10 +27,9 @@ resource "docker_image" "nginx" {
 }
 
 resource "docker_container" "nginx" {
-  name         = "hw1_terraform_nginx"
-  image        = docker_image.nginx.image_id
-  restart      = "unless-stopped"
-  network_mode = docker_network.nginx.name
+  name    = "hw1_terraform_nginx"
+  image   = docker_image.nginx.image_id
+  restart = "unless-stopped"
 
   networks_advanced {
     name = docker_network.nginx.name
@@ -39,12 +38,10 @@ resource "docker_container" "nginx" {
   ports {
     internal = 80
     external = var.nginx_port
-    ip       = "127.0.0.1"
   }
 
   volumes {
     volume_name    = docker_volume.nginx.name
     container_path = "/usr/share/nginx/html"
-    read_only      = true
   }
 }

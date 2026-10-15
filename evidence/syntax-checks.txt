@@ -1,2 +1,0 @@
-PASS: HCL syntax, 3 Terraform files
-PASS: YAML syntax, 3 Ansible files

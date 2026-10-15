@@ -3,23 +3,22 @@
   hosts: servers
   become: true
   tasks:
+    # Сразу после запуска Ubuntu apt-daily занимает apt; ждём, пока он закончит
+    - name: Wait for automatic apt updates
+      ansible.builtin.command: systemd-run --wait --quiet --property=After=apt-daily.service /bin/true
+      changed_when: false
+
     - name: Install required packages
       ansible.builtin.apt:
         name:
           - ca-certificates
           - curl
-          - sudo
           - gawk
           - rsyslog
+          - openssh-server
         state: present
         update_cache: true
         cache_valid_time: 3600
-
-    - name: Create keyring directory
-      ansible.builtin.file:
-        path: /etc/apt/keyrings
-        state: directory
-        mode: "0755"
 
     - name: Download Docker repository key
       ansible.builtin.get_url:
@@ -27,36 +26,23 @@
         dest: /etc/apt/keyrings/docker.asc
         mode: "0644"
 
-    - name: Get package architecture
-      ansible.builtin.command: dpkg --print-architecture
-      register: package_architecture
-      changed_when: false
-
     - name: Add Docker repository
       ansible.builtin.apt_repository:
-        repo: "deb [arch={{ package_architecture.stdout }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         filename: docker
-        state: present
 
-    - name: Install Docker and Compose
+    - name: Install Docker Engine and Docker Compose
       ansible.builtin.apt:
         name:
           - docker-ce
           - docker-ce-cli
           - containerd.io
-          - docker-buildx-plugin
           - docker-compose-plugin
         state: present
 
-    - name: Enable and start Docker
+    - name: Start Docker and enable it on boot
       ansible.builtin.service:
         name: docker
-        state: started
-        enabled: true
-
-    - name: Enable and start system log
-      ansible.builtin.service:
-        name: rsyslog
         state: started
         enabled: true
 
@@ -64,25 +50,18 @@
       ansible.builtin.user:
         name: deployer
         shell: /bin/bash
-        groups:
-          - sudo
-          - gawk
-          - rsyslog
-          - docker
+        groups: sudo,docker,adm
         append: true
-        create_home: true
         password_lock: true
 
-    - name: Allow sudo for deployer
+    - name: Allow sudo without password for deployer
       ansible.builtin.copy:
         dest: /etc/sudoers.d/deployer
         content: "deployer ALL=(ALL) NOPASSWD: ALL\n"
-        owner: root
-        group: root
         mode: "0440"
-        validate: /usr/sbin/visudo -cf %s
+        validate: visudo -cf %s
 
-    - name: Create SSH directory
+    - name: Create SSH directory for deployer
       ansible.builtin.file:
         path: /home/deployer/.ssh
         state: directory
@@ -90,10 +69,40 @@
         group: deployer
         mode: "0700"
 
-    - name: Add SSH public key
+    - name: Add SSH key for deployer
       ansible.builtin.copy:
-        content: "{{ lookup('file', 'keys/id_ed25519.pub') }}\n"
+        content: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}\n"
         dest: /home/deployer/.ssh/authorized_keys
         owner: deployer
         group: deployer
         mode: "0600"
+
+    - name: Allow SSH login only by key and not as root
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/10-hw1.conf
+        content: |
+          PasswordAuthentication no
+          PermitRootLogin no
+        mode: "0644"
+      notify: Restart SSH
+
+    - name: Start SSH and enable it on boot
+      ansible.builtin.service:
+        name: ssh
+        state: started
+        enabled: true
+
+    - name: Copy Docker Compose files to /opt/app
+      ansible.builtin.copy:
+        src: ../compose/
+        dest: /opt/app/
+        owner: deployer
+        group: deployer
+        mode: "0644"
+        directory_mode: "0755"
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
